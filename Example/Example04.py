@@ -52,12 +52,14 @@ class Agent:
         self.loss = tf.reduce_mean(-tf.log(self.responsible_outputs) * self.reward_holder)
 
         tvars = tf.trainable_variables()    # get the all declared trainable variables
+        # get gradients: round loss / round tvars
+        self.gradients = tf.gradients(self.loss, tvars)
+
+        # gradient that is needed to the optimizer
         self.gradient_holders = []
         for idx,var in enumerate(tvars):
             placeholder = tf.placeholder(tf.float32, name=str(idx)+'_holder')
             self.gradient_holders.append(placeholder)
-
-        self.gradients = tf.gradients(self.loss, tvars)
 
         optimizer = tf.train.AdamOptimizer(learning_rate=lr)
         self.update_batch = optimizer.apply_gradients(zip(self.gradient_holders, tvars))
@@ -102,7 +104,7 @@ with tf.Session() as sess:
 
             # Training with the delayed reward
             if d == True:
-                ep_history = np.array(ep_history)   # convert ep_history as np.array
+                ep_history = np.array(ep_history)   # convert ep_history as np.array - it supports calculation on [:, X]
                 ep_history[:, 2] = discount_reward(ep_history[:, 2])    # discount reward (index == 2)
                 feed_dict = {myAgent.reward_holder: ep_history[:, 2],
                              myAgent.action_holder: ep_history[:, 1],
