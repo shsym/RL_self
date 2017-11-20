@@ -19,7 +19,7 @@ class Qnetwork():
     def __init__(self, h_size):
         # scalarInput -> imageIn -> conv1 -> conv2 -> conv3 -> conv4 -> out(h_size)
         self.scalarInput = tf.placeholder(shape=[None, 21168], dtype=tf.float32)
-        self.imageIn = tf.reshape(self.scalarInput, shape=[-1, 84, 84, 3])
+        self.imageIn = tf.reshape(self.scalarInput, shape=[-1, 84, 84, 3])  # 84 x 84 pixels x rgb
         self.conv1 = slim.conv2d(inputs=self.imageIn, num_outputs=32,
                                  kernel_size=[8, 8], stride=[4, 4], padding='VALID',
                                  biases_initializer=None)
@@ -34,7 +34,7 @@ class Qnetwork():
                                  biases_initializer=None)
 
         # advantage and value function
-        self.streamAC, self.streamVC = tf.split(self.conv4, 2, 3)
+        self.streamAC, self.streamVC = tf.split(self.conv4, 2, axis=3)
         self.streamA = slim.flatten(self.streamAC)
         self.streamV = slim.flatten(self.streamVC)
         xavier_init = tf.contrib.layers.xavier_initializer()    #a kind of variance_scaling_initializer
@@ -114,3 +114,96 @@ tf.reset_default_graph()
 mainQN = Qnetwork(h_size)
 targetQN = Qnetwork(h_size)
 
+init = tf.global_variables_initializer()
+
+saver = tf.train.Saver()
+
+trainables = tf.trainable_variables()
+
+targetOps = updateTargetGraph(trainables, tau)
+
+myBuffer = experience_buffer()
+
+# prob. of random action
+e = startE
+stepDrop = (startE-endE)/annealing_steps
+
+# containers
+jList = []  # number of stpes
+rList = []  # rewards
+total_steps = 0
+
+# check path for saver
+if not os.path.exists(path):
+    os.makedirs(path)
+
+# main session
+with tf.Session() as sess:
+    sess.run(init)
+    if load_model:
+        print("Loading model...")
+        ckpt = tf.train.get_checkpoint_state(path)
+        saver.restore(sess, ckpt.model_checkpoint_path)
+
+    for i in range(num_episodes):
+        episodeBuffer = experience_buffer()
+        s = env.reset()     # reset environment
+        s = processState(s)     # make it to be flattened
+        d = False   # episode is done?
+        rAll = 0    #reward
+        j = 0
+
+        while j < max_epLength:
+            j += 1
+            if np.random.randint(1) < e or total_steps < pre_train_steps:
+                a = np.random.randint(0, 4)     # randomly choose an action
+            else:
+                a = sess.run(mainQN.predict, feed_dict={mainQN.scalarInput:[s]})    # a_t ~ mainQN(s_t)
+                a = a[0]
+            s1, r, d = env.step(a)
+            s1 = processState(s1)
+            total_steps += 1
+            episodeBuffer.add(np.reshape(np.array([s, a, r, s1, d]), [1, 5]))
+
+            if total_steps > pre_train_steps:
+                if e > endE:    # after the pre-training phase, adjust e
+                    e -= stepDrop
+
+                if total_steps % (update_freq) == 0:
+                    trainBatch = myBuffer.sample(batch_size)
+                    # train networks with s1
+                    Q1 = sess.run(mainQN.predict, feed_dict={mainQN.scalarInput: np.vstack(trainBatch[:, 3])})
+                    Q2, sC = sess.run([targetQN.Qout, targetQN.conv4], feed_dict={targetQN.scalarInput: np.stack(trainBatch[:, 3])})
+                    end_multiplier = -(trainBatch[:, 4] - 1)    # if destination then 0, otherwise 1
+                    doubleQ = Q2[range(batch_size), Q1]     # value of state in Q2
+                    targetQ = trainBatch[:, 2] + (y * doubleQ * end_multiplier)     # reward + expected return
+                    _ = sess.run(mainQN.updateModel,
+                                 feed_dict={mainQN.scalarInput: np.vstack(trainBatch[:, 0]),
+                                            mainQN.targetQ: targetQ, mainQN.actions: trainBatch[:, 1]})
+                    updateTarget(targetOps, sess)
+
+                rAll += r
+                s = s1
+
+                if d:
+                    break
+        # endWhile
+
+        myBuffer.add(episodeBuffer.buffer)
+        jList.append(j)
+        rList.append(rAll)
+
+        if i % 1000 == 0:
+            save_model_name = path+'/model-' + str(i) + '.ckpt'
+            saver.save(sess, save_model_name)
+            print("Saved Model: " + save_model_name)
+
+        if len(rList) % 10 == 0:
+            print(total_steps, np.mean(rList[-10:]), e)
+    saver.save(sess, path+'/model-' + str(i) + '.ckpt')
+print("precent of successful episodes: " + str(sum(rList)/num_episodes) + "%")
+
+
+rMat = np.resize(np.array(rList),[len(rList)//100,100])
+rMean = np.average(rMat,1)
+plt.plot(rMean)
